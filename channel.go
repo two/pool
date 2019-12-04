@@ -81,9 +81,17 @@ func (c *channelPool) getConns() chan *idleConn {
 	return conns
 }
 
-//Get 从pool中取一个连接
+// Get 从pool中取一个连接
+// 如果获取失败则新建一个连接
+// 如果新建连接没找到对应的函数，可能在重新赋值
+// 一共会尝试 3 次获取连接
 func (c *channelPool) Get() (interface{}, error) {
+	var retry int
 walk:
+	if retry > 2 {
+		return nil, errors.New("not get connection with 3 times retry")
+	}
+
 	conns := c.getConns()
 	if conns == nil {
 		conn, err := c.newConn()
@@ -92,35 +100,34 @@ walk:
 		}
 		return conn, err
 	}
-	for {
-		select {
-		case wrapConn := <-conns:
-			if wrapConn == nil {
-				return nil, ErrClosed
-			}
-			//判断是否超时，超时则丢弃
-			if timeout := c.idleTimeout; timeout > 0 {
-				if wrapConn.t.Add(timeout).Before(time.Now()) {
-					//丢弃并关闭该连接
-					c.Close(wrapConn.conn)
-					continue
-				}
-			}
-			//判断是否失效，失效则丢弃，如果用户没有设定 ping 方法，就不检查
-			if c.ping != nil {
-				if err := c.Ping(wrapConn.conn); err != nil {
-					fmt.Println("conn is not able to be connected: ", err)
-					continue
-				}
-			}
-			return wrapConn.conn, nil
-		default:
-			conn, err := c.newConn()
-			if err == ErrFactory {
-				continue
-			}
-			return conn, err
+
+	select {
+	case wrapConn := <-conns:
+		if wrapConn == nil {
+			return nil, ErrClosed
 		}
+		//判断是否超时，超时则丢弃
+		if timeout := c.idleTimeout; timeout > 0 {
+			if wrapConn.t.Add(timeout).Before(time.Now()) {
+				//丢弃并关闭该连接
+				c.Close(wrapConn.conn)
+				goto walk
+			}
+		}
+		//判断是否失效，失效则丢弃，如果用户没有设定 ping 方法，就不检查
+		if c.ping != nil {
+			if err := c.Ping(wrapConn.conn); err != nil {
+				fmt.Println("conn is not able to be connected: ", err)
+				goto walk
+			}
+		}
+		return wrapConn.conn, nil
+	default:
+		conn, err := c.newConn()
+		if err == ErrFactory {
+			goto walk
+		}
+		return conn, err
 	}
 }
 
