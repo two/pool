@@ -85,7 +85,7 @@ func (c *channelPool) getConns() chan *idleConn {
 func (c *channelPool) Get() (interface{}, error) {
 	conns := c.getConns()
 	if conns == nil {
-		return nil, ErrClosed
+		return newConn()
 	}
 	for {
 		select {
@@ -110,20 +110,23 @@ func (c *channelPool) Get() (interface{}, error) {
 			}
 			return wrapConn.conn, nil
 		default:
-			c.mu.Lock()
-			if c.factory == nil {
-				c.mu.Unlock()
-				continue
-			}
-			conn, err := c.factory()
-			c.mu.Unlock()
-			if err != nil {
-				return nil, err
-			}
-
-			return conn, nil
+			return newConn()
 		}
 	}
+}
+
+func (c *channelPool) newConn() (interface{}, err) {
+	c.mu.Lock()
+	if c.factory == nil {
+		c.mu.Unlock()
+		continue
+	}
+	conn, err := c.factory()
+	c.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
 }
 
 //Put 将连接放回pool中
