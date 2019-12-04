@@ -83,9 +83,14 @@ func (c *channelPool) getConns() chan *idleConn {
 
 //Get 从pool中取一个连接
 func (c *channelPool) Get() (interface{}, error) {
+walk:
 	conns := c.getConns()
 	if conns == nil {
-		return c.newConn()
+		conn, err := c.newConn()
+		if err == ErrFactory {
+			goto walk
+		}
+		return conn, err
 	}
 	for {
 		select {
