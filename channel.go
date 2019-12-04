@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// PoolConfig 连接池相关配置
-type PoolConfig struct {
+// Config 连接池相关配置
+type Config struct {
 	//连接池中拥有的最小连接数
 	InitialCap int
 	//连接池中拥有的最大的连接数
@@ -39,29 +39,29 @@ type idleConn struct {
 }
 
 //NewChannelPool 初始化连接
-func NewChannelPool(poolConfig *PoolConfig) (Pool, error) {
-	if poolConfig.InitialCap < 0 || poolConfig.MaxCap <= 0 || poolConfig.InitialCap > poolConfig.MaxCap {
+func NewChannelPool(config *Config) (Pool, error) {
+	if config.InitialCap < 0 || config.MaxCap <= 0 || config.InitialCap > config.MaxCap {
 		return nil, errors.New("invalid capacity settings")
 	}
-	if poolConfig.Factory == nil {
+	if config.Factory == nil {
 		return nil, errors.New("invalid factory func settings")
 	}
-	if poolConfig.Close == nil {
+	if config.Close == nil {
 		return nil, errors.New("invalid close func settings")
 	}
 
 	c := &channelPool{
-		conns:       make(chan *idleConn, poolConfig.MaxCap),
-		factory:     poolConfig.Factory,
-		close:       poolConfig.Close,
-		idleTimeout: poolConfig.IdleTimeout,
+		conns:       make(chan *idleConn, config.MaxCap),
+		factory:     config.Factory,
+		close:       config.Close,
+		idleTimeout: config.IdleTimeout,
 	}
 
-	if poolConfig.Ping != nil {
-		c.ping = poolConfig.Ping
+	if config.Ping != nil {
+		c.ping = config.Ping
 	}
 
-	for i := 0; i < poolConfig.InitialCap; i++ {
+	for i := 0; i < config.InitialCap; i++ {
 		conn, err := c.factory()
 		if err != nil {
 			c.Release()
@@ -85,7 +85,7 @@ func (c *channelPool) getConns() chan *idleConn {
 func (c *channelPool) Get() (interface{}, error) {
 	conns := c.getConns()
 	if conns == nil {
-		return newConn()
+		return c.newConn()
 	}
 	for {
 		select {
@@ -110,19 +110,23 @@ func (c *channelPool) Get() (interface{}, error) {
 			}
 			return wrapConn.conn, nil
 		default:
-			return newConn()
+			conn, err := c.newConn()
+			if err == ErrFactory {
+				continue
+			}
+			return conn, err
 		}
 	}
 }
 
-func (c *channelPool) newConn() (interface{}, err) {
+func (c *channelPool) newConn() (interface{}, error) {
 	c.mu.Lock()
-	if c.factory == nil {
-		c.mu.Unlock()
-		continue
-	}
-	conn, err := c.factory()
+	factory := c.factory
 	c.mu.Unlock()
+	if factory == nil {
+		return nil, ErrFactory
+	}
+	conn, err := factory()
 	if err != nil {
 		return nil, err
 	}
