@@ -9,17 +9,19 @@ import (
 
 // Config 连接池相关配置
 type Config struct {
-	//连接池中拥有的最小连接数
+	// 连接池中拥有的最小连接数
 	InitialCap int
-	//连接池中拥有的最大的连接数
+	// 连接池中拥有的最大的连接数
 	MaxCap int
-	//生成连接的方法
+	// 从连接池获取连接的次数
+	MaxTry int
+	// 生成连接的方法
 	Factory func() (interface{}, error)
-	//关闭连接的方法
+	// 关闭连接的方法
 	Close func(interface{}) error
-	//检查连接是否有效的方法
+	// 检查连接是否有效的方法
 	Ping func(interface{}) error
-	//连接最大空闲时间，超过该事件则将失效
+	// 连接最大空闲时间，超过该事件则将失效
 	IdleTimeout time.Duration
 }
 
@@ -31,6 +33,7 @@ type channelPool struct {
 	close       func(interface{}) error
 	ping        func(interface{}) error
 	idleTimeout time.Duration
+	maxTry      int
 }
 
 type idleConn struct {
@@ -42,6 +45,9 @@ type idleConn struct {
 func NewChannelPool(config *Config) (Pool, error) {
 	if config.InitialCap < 0 || config.MaxCap <= 0 || config.InitialCap > config.MaxCap {
 		return nil, errors.New("invalid capacity settings")
+	}
+	if config.MaxTry < 1 {
+		return nil, errors.New("invalid max try settings")
 	}
 	if config.Factory == nil {
 		return nil, errors.New("invalid factory func settings")
@@ -55,6 +61,7 @@ func NewChannelPool(config *Config) (Pool, error) {
 		factory:     config.Factory,
 		close:       config.Close,
 		idleTimeout: config.IdleTimeout,
+		maxTry:      config.MaxTry,
 	}
 
 	if config.Ping != nil {
@@ -84,51 +91,48 @@ func (c *channelPool) getConns() chan *idleConn {
 // Get 从pool中取一个连接
 // 如果获取失败则新建一个连接
 // 如果新建连接没找到对应的函数，可能在重新赋值
-// 一共会尝试 3 次获取连接
 func (c *channelPool) Get() (interface{}, error) {
-	var retry int
-walk:
-	if retry > 2 {
-		return nil, errors.New("not get connection with 3 times retry")
-	}
-
-	conns := c.getConns()
-	if conns == nil {
-		conn, err := c.newConn()
-		if err == ErrFactory {
-			goto walk
-		}
-		return conn, err
-	}
-
-	select {
-	case wrapConn := <-conns:
-		if wrapConn == nil {
-			return nil, ErrClosed
-		}
-		//判断是否超时，超时则丢弃
-		if timeout := c.idleTimeout; timeout > 0 {
-			if wrapConn.t.Add(timeout).Before(time.Now()) {
-				//丢弃并关闭该连接
-				c.Close(wrapConn.conn)
-				goto walk
+	for i := 0; i < c.maxTry; i++ {
+		conns := c.getConns()
+		if conns == nil {
+			conn, err := c.newConn()
+			if err == ErrFactory {
+				continue
 			}
+			return conn, err
 		}
-		//判断是否失效，失效则丢弃，如果用户没有设定 ping 方法，就不检查
-		if c.ping != nil {
-			if err := c.Ping(wrapConn.conn); err != nil {
-				fmt.Println("conn is not able to be connected: ", err)
-				goto walk
+
+		select {
+		case wrapConn := <-conns:
+			if wrapConn == nil {
+				return nil, ErrClosed
 			}
+			//判断是否超时，超时则丢弃
+			if timeout := c.idleTimeout; timeout > 0 {
+				if wrapConn.t.Add(timeout).Before(time.Now()) {
+					//丢弃并关闭该连接
+					c.Close(wrapConn.conn)
+					continue
+				}
+			}
+			//判断是否失效，失效则丢弃，如果用户没有设定 ping 方法，就不检查
+			if c.ping != nil {
+				if err := c.Ping(wrapConn.conn); err != nil {
+					fmt.Println("conn is not able to be connected: ", err)
+					continue
+				}
+			}
+			return wrapConn.conn, nil
+		default:
+			conn, err := c.newConn()
+			if err == ErrFactory {
+				continue
+			}
+			return conn, err
 		}
-		return wrapConn.conn, nil
-	default:
-		conn, err := c.newConn()
-		if err == ErrFactory {
-			goto walk
-		}
-		return conn, err
+
 	}
+	return nil, errors.New("not get connection with max times retry")
 }
 
 func (c *channelPool) newConn() (interface{}, error) {

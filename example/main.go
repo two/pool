@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/silenceper/pool"
+	"github.com/two/pool"
 	"net"
 	"os"
 	"os/signal"
